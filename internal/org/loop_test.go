@@ -11,7 +11,7 @@ import (
 // staticBriefer returns a fixed brief and never shells out.
 type staticBriefer struct{ err error }
 
-func (s staticBriefer) Brief(_ context.Context, _ string, _ *state.State, seat agent.SeatSpec) (string, error) {
+func (s staticBriefer) Brief(_ context.Context, _ string, _ *state.State, seat agent.SeatSpec, _ []state.SeatOutcome) (string, error) {
 	return "brief for " + seat.Role, s.err
 }
 

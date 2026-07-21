@@ -5,6 +5,10 @@ surface the risks. You do NOT write code and you do NOT edit files.
 Goal:
 ${GOAL}
 
+${REFINED_GOAL}
+${SUBGOALS}
+${FOCUS}
+
 What you have available:
 - The Entire code graph and durable brain are wired to you as the `entire-brain`
   MCP server. Use it to locate the relevant symbols, callers/callees, prior

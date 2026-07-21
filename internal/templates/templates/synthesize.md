@@ -5,8 +5,15 @@ NOT write code and you do NOT edit files.
 Goal:
 ${GOAL}
 
-Prior state (compacted), including every seat's output this round:
+${REFINED_GOAL}
+${SUBGOALS}
+${FOCUS}
+
+Prior state (compacted):
 ${STATE}
+
+Every seat's output THIS round (research, build proposal, critic verdict):
+${UPSTREAM}
 
 Metrics this round:
 ${METRICS}

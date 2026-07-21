@@ -157,6 +157,24 @@ func coerceMetrics(raw json.RawMessage) map[string]float64 {
 	return out
 }
 
+// ExtractInnerJSON returns the first balanced JSON object embedded in a worker's
+// raw stdout. It unwraps a `claude --output-format json` envelope (reading its
+// `result` text) when present, then strips an optional code fence — mirroring the
+// exact extraction ParseSeatOutput performs. This lets a caller read a seat's
+// structured output that does NOT fit the seatRaw schema (e.g. the control seat's
+// plan object) using identical, injection-aware unwrapping. ok is false when no
+// balanced object is present. It never executes anything and is pure.
+func ExtractInnerJSON(raw string) (string, bool) {
+	inner := raw
+	if env, ok := parseEnvelope(raw); ok && strings.TrimSpace(env.Result) != "" {
+		inner = env.Result
+	}
+	if obj, ok := extractOuterJSONObject(inner); ok {
+		return obj, true
+	}
+	return extractOuterJSONObject(stripJSONFences(inner))
+}
+
 func parseEnvelope(s string) (claudeEnvelope, bool) {
 	var env claudeEnvelope
 	trimmed := strings.TrimSpace(s)

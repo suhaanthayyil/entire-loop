@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,12 +26,15 @@ const probeTimeout = 15 * time.Second
 // ---- run ----
 
 type runParams struct {
-	repo   string
-	rounds int
-	jobs   int
-	model  string
-	effort string
-	goal   string
+	repo          string
+	rounds        int
+	maxRounds     int
+	jobs          int
+	model         string
+	effort        string
+	goal          string
+	allowMutating bool
+	planner       string
 }
 
 func newRunCommand(_ string) *cobra.Command {
@@ -48,10 +52,15 @@ The goal is the remaining positional arguments joined together, so both
 		},
 	}
 	cmd.Flags().StringVar(&p.repo, "repo", "", "Repository root (fallback: ENTIRE_REPO_ROOT, then git discovery)")
-	cmd.Flags().IntVar(&p.rounds, "rounds", 1, "Maximum number of loop rounds")
+	cmd.Flags().IntVar(&p.rounds, "rounds", 0, "Fixed number of rounds (0 = converge until dry). Alias/cap for --max-rounds")
+	cmd.Flags().IntVar(&p.maxRounds, "max-rounds", org.DefaultMaxRounds, "Safety cap on rounds in converge mode")
 	cmd.Flags().IntVar(&p.jobs, "jobs", 2, "Max concurrent worker seats (the CONC cap)")
 	cmd.Flags().StringVar(&p.model, "model", "", "Worker model override (passed to claude --model)")
 	cmd.Flags().StringVar(&p.effort, "effort", "", "Worker reasoning effort, e.g. low, medium, high")
+	cmd.Flags().BoolVar(&p.allowMutating, "allow-mutating-build", false,
+		"Let the build seat run a bypassPermissions coding agent in an isolated throwaway clone (default: plan-mode propose-as-text only)")
+	cmd.Flags().StringVar(&p.planner, "planner", "llm",
+		"Round planner: \"llm\" (self-planning control plane — an LLM control seat plans and re-plans each round; adds one control-seat cost per round) or \"fixed\" (static research/build/critic/measure roster)")
 	return cmd
 }
 
@@ -72,6 +81,9 @@ func runLoop(cmd *cobra.Command, p runParams) error {
 	runID := newRunID()
 	store := state.NewStore(dataDir, runID)
 
+	// Reclaim any throwaway build clones a prior crashed/killed run leaked.
+	agent.PruneOrphanBuildClones()
+
 	runner := agent.ExecRunner{
 		RepoRoot: repoRoot,
 		Dir:      repoRoot,
@@ -81,22 +93,36 @@ func runLoop(cmd *cobra.Command, p runParams) error {
 	builder := briefing.Builder{Env: briefing.Env{RepoRoot: repoRoot, DataDir: dataDir}}
 
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "entire-loop: goal=%q repo=%s run=%s rounds=%d jobs=%d\n",
-		p.goal, repoRoot, runID, p.rounds, p.jobs)
+	base := org.FixedPlanner{Model: p.model, Effort: p.effort, RepoRoot: repoRoot, AllowMutating: p.allowMutating}
+	planner, err := buildPlanner(p.planner, base, runner, builder, out)
+	if err != nil {
+		return err
+	}
+
+	mode := "converge"
+	if p.rounds > 0 {
+		mode = fmt.Sprintf("fixed %d round(s)", p.rounds)
+	}
+	fmt.Fprintf(out, "entire-loop: goal=%q repo=%s run=%s mode=%s planner=%s max_rounds=%d jobs=%d\n",
+		p.goal, repoRoot, runID, mode, plannerLabel(p.planner), p.maxRounds, p.jobs)
+	if p.allowMutating {
+		fmt.Fprintln(out, "entire-loop: --allow-mutating-build ON — the build seat will run a bypassPermissions coding agent in an ISOLATED throwaway clone (your repo is not touched; env is scrubbed).")
+	}
 
 	opts := org.Options{
-		Goal:     p.goal,
-		Rounds:   p.rounds,
-		Jobs:     p.jobs,
-		Model:    p.model,
-		Effort:   p.effort,
-		RepoRoot: repoRoot,
-		Runner:   runner,
-		Briefer:  builder,
-		Planner:  org.FixedPlanner{Model: p.model, Effort: p.effort, RepoRoot: repoRoot},
-		Reorg:    org.NoopReorg{},
-		Store:    store,
-		Stdout:   out,
+		Goal:      p.goal,
+		Rounds:    p.rounds,
+		MaxRounds: p.maxRounds,
+		Jobs:      p.jobs,
+		Model:     p.model,
+		Effort:    p.effort,
+		RepoRoot:  repoRoot,
+		Runner:    runner,
+		Briefer:   builder,
+		Planner:   planner,
+		Reorg:     org.RulesReorg{Goal: p.goal},
+		Store:     store,
+		Stdout:    out,
 	}
 	if _, err := org.Run(cmd.Context(), opts); err != nil {
 		return err
@@ -105,8 +131,36 @@ func runLoop(cmd *cobra.Command, p runParams) error {
 	return nil
 }
 
+// buildPlanner selects the round planner from the --planner flag. "llm" (the
+// default) is the self-planning control plane — an LLM control seat plans and
+// re-plans each round; "fixed" is the static research/build/critic/measure roster.
+// The LLM planner reuses the loop's runner and briefer to spawn its control seat
+// and writes graceful-degrade notices to warn. An unknown value is an error.
+func buildPlanner(mode string, base org.FixedPlanner, runner agent.Runner, briefer org.Briefer, warn io.Writer) (org.Planner, error) {
+	switch mode {
+	case "", "llm":
+		return org.LLMPlanner{Base: base, Runner: runner, Briefer: briefer, Warn: warn}, nil
+	case "fixed":
+		return base, nil
+	default:
+		return nil, fmt.Errorf("--planner must be \"llm\" or \"fixed\", got %q", mode)
+	}
+}
+
+// plannerLabel normalizes the planner mode for display.
+func plannerLabel(mode string) string {
+	if mode == "fixed" {
+		return "fixed"
+	}
+	return "llm"
+}
+
+// resolveGitTimeout bounds the git top-level discovery so a wedged git can never
+// block the run from starting.
+const resolveGitTimeout = 5 * time.Second
+
 // resolveRepoRoot resolves the target repo: --repo, then ENTIRE_REPO_ROOT, then
-// git top-level discovery.
+// git top-level discovery (under a short timeout).
 func resolveRepoRoot(ctx context.Context, explicit string, env EntireEnv) (string, error) {
 	if explicit != "" {
 		return explicit, nil
@@ -114,7 +168,9 @@ func resolveRepoRoot(ctx context.Context, explicit string, env EntireEnv) (strin
 	if env.RepoRoot != "" {
 		return env.RepoRoot, nil
 	}
-	out, err := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel").Output()
+	gctx, cancel := context.WithTimeout(ctx, resolveGitTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(gctx, "git", "rev-parse", "--show-toplevel").Output()
 	if err != nil {
 		return "", fmt.Errorf("resolve repo root: pass --repo or set ENTIRE_REPO_ROOT (git discovery failed: %v)", err)
 	}

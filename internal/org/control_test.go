@@ -1,6 +1,7 @@
 package org
 
 import (
+	"context"
 	"testing"
 
 	"github.com/suhaanthayyil/entire-loop/internal/agent"
@@ -8,7 +9,7 @@ import (
 
 func TestFixedPlanner_HybridWiring(t *testing.T) {
 	t.Parallel()
-	seats := FixedPlanner{Model: "sonnet", Effort: "low", RepoRoot: "/repo"}.Plan("goal", nil)
+	seats := FixedPlanner{Model: "sonnet", Effort: "low", RepoRoot: "/repo"}.Plan(context.Background(), "goal", nil)
 
 	byRole := map[string]agent.SeatSpec{}
 	for _, s := range seats {
@@ -46,6 +47,35 @@ func TestFixedPlanner_HybridWiring(t *testing.T) {
 		if s.Model != "sonnet" || s.Effort != "low" || s.RepoRoot != "/repo" {
 			t.Errorf("seat %s missing config stamp; got %+v", s.Role, s)
 		}
+	}
+}
+
+// TestFixedPlanner_MutatingIsOptIn: the build seat is NON-mutating by default
+// (safe `entire loop run`) and mutating only when AllowMutating is set.
+func TestFixedPlanner_MutatingIsOptIn(t *testing.T) {
+	t.Parallel()
+	// Default: build is plan-mode propose-as-text (not mutating).
+	for _, s := range (FixedPlanner{}).Plan(context.Background(), "goal", nil) {
+		if s.Role == agent.RoleBuild && s.Mutating {
+			t.Errorf("build seat must be non-mutating by default; got %+v", s)
+		}
+	}
+	// Every other seat is always non-mutating, regardless of the flag.
+	var buildFound bool
+	for _, s := range (FixedPlanner{AllowMutating: true}).Plan(context.Background(), "goal", nil) {
+		if s.Role == agent.RoleBuild {
+			buildFound = true
+			if !s.Mutating {
+				t.Errorf("build seat must be mutating when AllowMutating is set; got %+v", s)
+			}
+			continue
+		}
+		if s.Mutating {
+			t.Errorf("only the build seat may be mutating; %s is mutating", s.Role)
+		}
+	}
+	if !buildFound {
+		t.Fatal("build seat missing from the roster")
 	}
 }
 

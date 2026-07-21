@@ -29,7 +29,7 @@ func TestBuildBrief_SubstitutesAndDegrades(t *testing.T) {
 		Env:  Env{RepoRoot: "/repo"},
 		Exec: fakeExec,
 	}
-	brief, err := b.Brief(context.Background(), "make ingest deterministic", nil, agent.SeatSpec{Role: agent.RoleResearch})
+	brief, err := b.Brief(context.Background(), "make ingest deterministic", nil, agent.SeatSpec{Role: agent.RoleResearch}, nil)
 	if err != nil {
 		t.Fatalf("Brief: %v", err)
 	}
@@ -50,6 +50,34 @@ func TestBuildBrief_SubstitutesAndDegrades(t *testing.T) {
 	}
 }
 
+// TestBuildBrief_GraphUsesSeatRepoRoot proves the graph invocation binds to the
+// SEAT's repo root when set — this is what keeps a mutating build seat's brief
+// pointed at the throwaway clone instead of leaking the real repo path.
+func TestBuildBrief_GraphUsesSeatRepoRoot(t *testing.T) {
+	t.Parallel()
+	var gotRepo string
+	fakeExec := func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if len(args) >= 1 && args[0] == "graph" {
+			for i, a := range args {
+				if a == "--repo" && i+1 < len(args) {
+					gotRepo = args[i+1]
+				}
+			}
+			return []byte(`{"symbol":"X"}`), nil
+		}
+		return []byte("ctx"), nil
+	}
+	b := Builder{Env: Env{RepoRoot: "/real/repo"}, Exec: fakeExec}
+	_, err := b.Brief(context.Background(), "goal", nil,
+		agent.SeatSpec{Role: agent.RoleBuild, RepoRoot: "/tmp/clone-xyz"}, nil)
+	if err != nil {
+		t.Fatalf("Brief: %v", err)
+	}
+	if gotRepo != "/tmp/clone-xyz" {
+		t.Errorf("graph --repo = %q, want the seat's clone root /tmp/clone-xyz (not the env repo)", gotRepo)
+	}
+}
+
 func TestBuildBrief_BrainQueryIsPrimary(t *testing.T) {
 	t.Parallel()
 	// `brain query` is the one and only brain call now (`brain context` is not a
@@ -66,7 +94,7 @@ func TestBuildBrief_BrainQueryIsPrimary(t *testing.T) {
 		return nil, errors.New("unexpected")
 	}
 	b := Builder{Exec: fakeExec}
-	brief, err := b.Brief(context.Background(), "goal", nil, agent.SeatSpec{Role: agent.RoleCritic})
+	brief, err := b.Brief(context.Background(), "goal", nil, agent.SeatSpec{Role: agent.RoleCritic}, nil)
 	if err != nil {
 		t.Fatalf("Brief: %v", err)
 	}
@@ -89,7 +117,7 @@ func TestBuildBrief_BrainQueryHangIsGracefulNote(t *testing.T) {
 		return nil, ctx.Err()
 	}
 	b := Builder{Exec: fakeExec}
-	brief, err := b.Brief(newShortCtx(t), "goal", nil, agent.SeatSpec{Role: agent.RoleCritic})
+	brief, err := b.Brief(newShortCtx(t), "goal", nil, agent.SeatSpec{Role: agent.RoleCritic}, nil)
 	if err != nil {
 		t.Fatalf("Brief: %v", err)
 	}
@@ -136,7 +164,7 @@ func TestBuildBrief_BoundedToMaxBytes(t *testing.T) {
 		return []byte(big), nil
 	}
 	b := Builder{Exec: fakeExec, MaxBytes: 4096}
-	brief, err := b.Brief(context.Background(), "goal", nil, agent.SeatSpec{Role: agent.RoleBuild})
+	brief, err := b.Brief(context.Background(), "goal", nil, agent.SeatSpec{Role: agent.RoleBuild}, nil)
 	if err != nil {
 		t.Fatalf("Brief: %v", err)
 	}
@@ -167,6 +195,96 @@ func TestCompactState_Summarizes(t *testing.T) {
 	}
 	if !strings.Contains(out, "proposed diff") {
 		t.Errorf("compactState should note the proposed diff; got:\n%s", out)
+	}
+}
+
+func TestBuildBrief_RendersUpstreamAndLens(t *testing.T) {
+	t.Parallel()
+	// A verifier seat's brief must carry the upstream item under review (build's
+	// real proposal + research findings) and its refutation lens.
+	fakeExec := func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if len(args) >= 1 && args[0] == "graph" {
+			return []byte(`{"symbol":"Foo"}`), nil
+		}
+		return []byte("ctx"), nil
+	}
+	b := Builder{Exec: fakeExec}
+	upstream := []state.SeatOutcome{
+		{Role: "research", Findings: []string{"RESEARCH-EDGE-FINDING"}},
+		{Role: "build", Proposal: "--- a/x\n+++ b/x\n+BUILD-EDGE-DIFF\n"},
+	}
+	brief, err := b.Brief(context.Background(), "goal", nil,
+		agent.SeatSpec{Role: agent.RoleVerifyCorrectness, Lens: "CORRECTNESS-LENS"}, upstream)
+	if err != nil {
+		t.Fatalf("Brief: %v", err)
+	}
+	if !strings.Contains(brief, "RESEARCH-EDGE-FINDING") {
+		t.Errorf("verifier brief missing upstream research finding; got:\n%s", brief)
+	}
+	if !strings.Contains(brief, "BUILD-EDGE-DIFF") {
+		t.Errorf("verifier brief missing upstream build proposal; got:\n%s", brief)
+	}
+	if !strings.Contains(brief, "CORRECTNESS-LENS") {
+		t.Errorf("verifier brief missing the refutation lens; got:\n%s", brief)
+	}
+}
+
+// TestBuildBrief_RendersFocusAndRefinedGoal proves the control plane's per-seat
+// focus and the refined goal/subgoals from state are substituted into the seat's
+// brief via the ${FOCUS}/${REFINED_GOAL}/${SUBGOALS} markers (no marker survives).
+func TestBuildBrief_RendersFocusAndRefinedGoal(t *testing.T) {
+	t.Parallel()
+	fakeExec := func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if len(args) >= 1 && args[0] == "graph" {
+			return []byte(`{"symbol":"X"}`), nil
+		}
+		return []byte("ctx"), nil
+	}
+	b := Builder{Exec: fakeExec}
+	st := &state.State{RefinedGoal: "REFINED-GOAL-TOKEN", Subgoals: []string{"SUBGOAL-TOKEN"}}
+	brief, err := b.Brief(context.Background(), "goal", st,
+		agent.SeatSpec{Role: agent.RoleResearch, Focus: "FOCUS-PROMPT-TOKEN"}, nil)
+	if err != nil {
+		t.Fatalf("Brief: %v", err)
+	}
+	for _, want := range []string{"FOCUS-PROMPT-TOKEN", "REFINED-GOAL-TOKEN", "SUBGOAL-TOKEN"} {
+		if !strings.Contains(brief, want) {
+			t.Errorf("brief missing %q; got:\n%s", want, brief)
+		}
+	}
+	for _, marker := range []string{"${FOCUS}", "${REFINED_GOAL}", "${SUBGOALS}"} {
+		if strings.Contains(brief, marker) {
+			t.Errorf("brief still contains unfilled marker %q", marker)
+		}
+	}
+}
+
+// TestBuildBrief_EmptyFocusCollapses confirms an empty focus / no refinement leaves
+// no leftover label or marker in the brief.
+func TestBuildBrief_EmptyFocusCollapses(t *testing.T) {
+	t.Parallel()
+	fakeExec := func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		return []byte("x"), nil
+	}
+	b := Builder{Exec: fakeExec}
+	brief, err := b.Brief(context.Background(), "goal", nil, agent.SeatSpec{Role: agent.RoleResearch}, nil)
+	if err != nil {
+		t.Fatalf("Brief: %v", err)
+	}
+	for _, marker := range []string{"${FOCUS}", "${REFINED_GOAL}", "${SUBGOALS}"} {
+		if strings.Contains(brief, marker) {
+			t.Errorf("unfilled marker %q survived an empty render", marker)
+		}
+	}
+	if strings.Contains(brief, "control plane") {
+		t.Errorf("empty focus/refinement should render NO control-plane label; got:\n%s", brief)
+	}
+}
+
+func TestUpstreamBlock_Empty(t *testing.T) {
+	t.Parallel()
+	if got := upstreamBlock(nil, 1024); got != "(no upstream seat output this round)" {
+		t.Errorf("upstreamBlock(nil) = %q", got)
 	}
 }
 

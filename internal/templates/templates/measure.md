@@ -5,11 +5,18 @@ You do NOT write code and you do NOT edit files.
 Goal:
 ${GOAL}
 
+${REFINED_GOAL}
+${SUBGOALS}
+${FOCUS}
+
 Prior state (compacted):
 ${STATE}
 
 Prior metrics:
 ${METRICS}
+
+This round's upstream work (research findings, build proposal, critic verdict):
+${UPSTREAM}
 
 Code graph (symbols, bounded head):
 ${GRAPH}

@@ -18,16 +18,21 @@ import (
 // deliberately decoupled from the agent package so state has no dependency on
 // the exec/argv machinery.
 type SeatOutcome struct {
-	Role     string             `json:"role"`
-	OK       bool               `json:"ok"`
-	Warnings []string           `json:"warnings,omitempty"`
-	CostUSD  float64            `json:"cost_usd"`
-	NumTurns int                `json:"num_turns,omitempty"`
-	Findings []string           `json:"findings,omitempty"`
-	Proposal string             `json:"proposal,omitempty"`
-	Metrics  map[string]float64 `json:"metrics,omitempty"`
-	Verdict  string             `json:"verdict,omitempty"`
-	GoalMet  bool               `json:"goal_met,omitempty"`
+	Role     string   `json:"role"`
+	OK       bool     `json:"ok"`
+	Warnings []string `json:"warnings,omitempty"`
+	CostUSD  float64  `json:"cost_usd"`
+	NumTurns int      `json:"num_turns,omitempty"`
+	Findings []string `json:"findings,omitempty"`
+	Proposal string   `json:"proposal,omitempty"`
+	// ProposalKey is the stable dedupe key for this seat's proposal, persisted so a
+	// process-resume can rebuild the convergence `seen` set even when the proposal
+	// text itself was dropped (e.g. a verifier-refuted build proposal is cleared
+	// from Proposal but its key is retained here, so it never resurfaces on resume).
+	ProposalKey string             `json:"proposal_key,omitempty"`
+	Metrics     map[string]float64 `json:"metrics,omitempty"`
+	Verdict     string             `json:"verdict,omitempty"`
+	GoalMet     bool               `json:"goal_met,omitempty"`
 }
 
 // RoundState captures everything produced in a single round of the loop.
@@ -36,6 +41,7 @@ type RoundState struct {
 	Seats     []SeatOutcome      `json:"seats"`
 	Metrics   map[string]float64 `json:"metrics,omitempty"`
 	Verdict   string             `json:"verdict,omitempty"`
+	Route     string             `json:"route,omitempty"`
 	GoalMet   bool               `json:"goal_met"`
 	CostUSD   float64            `json:"cost_usd"`
 	StartedAt time.Time          `json:"started_at"`
@@ -43,10 +49,18 @@ type RoundState struct {
 }
 
 // State is the full persisted record of a loop run.
+//
+// RefinedGoal and Subgoals are the LLM control plane's evolving restatement of the
+// goal: the control seat refines them each round and they are persisted here so
+// (a) subsequent worker seats' briefs carry the sharpened goal and (b) the next
+// round's control seat builds on its own prior planning rather than restarting.
+// They are empty under the fixed planner.
 type State struct {
 	SchemaVersion int                `json:"schema_version"`
 	RunID         string             `json:"run_id"`
 	Goal          string             `json:"goal"`
+	RefinedGoal   string             `json:"refined_goal,omitempty"`
+	Subgoals      []string           `json:"subgoals,omitempty"`
 	Round         int                `json:"round"`
 	Rounds        []RoundState       `json:"rounds"`
 	Metrics       map[string]float64 `json:"metrics,omitempty"`

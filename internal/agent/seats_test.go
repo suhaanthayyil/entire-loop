@@ -109,13 +109,13 @@ func TestBuildCmd_DefaultModelPerSeatTier(t *testing.T) {
 	// Cheap seat (McpBrain=false), no override → the explicit cheap model id (the
 	// bare "haiku" alias does not resolve).
 	cheap := BuildCmd(context.Background(), SeatSpec{Role: RoleMeasure, BriefOnly: true}, "brief")
-	if !argHasFlagValue(cheap.Args, "--model", cheapSeatModel) {
-		t.Errorf("cheap seat should default to --model %s; args=%v", cheapSeatModel, cheap.Args)
+	if !argHasFlagValue(cheap.Args, "--model", ModelCheap) {
+		t.Errorf("cheap seat should default to --model %s; args=%v", ModelCheap, cheap.Args)
 	}
 	// Deep seat (McpBrain=true), no override → the deep default.
 	deep := BuildCmd(context.Background(), SeatSpec{Role: RoleResearch, McpBrain: true}, "brief")
-	if !argHasFlagValue(deep.Args, "--model", deepSeatModel) {
-		t.Errorf("deep seat should default to --model %s; args=%v", deepSeatModel, deep.Args)
+	if !argHasFlagValue(deep.Args, "--model", ModelDeep) {
+		t.Errorf("deep seat should default to --model %s; args=%v", ModelDeep, deep.Args)
 	}
 	// An explicit override always wins, regardless of tier.
 	over := BuildCmd(context.Background(), SeatSpec{Role: RoleMeasure, BriefOnly: true, Model: "opus"}, "brief")
@@ -152,6 +152,98 @@ func TestRepoBindWarning(t *testing.T) {
 	if w := repoBindWarning(SeatSpec{Role: RoleBuild, McpBrain: false}); w != "" {
 		t.Errorf("cheap seat should not warn; got %q", w)
 	}
+}
+
+// TestBuildMutatingCmd_ScrubsEnv verifies the bypassPermissions build worker gets
+// a minimal allowlisted environment: ambient cloud creds / API keys / tokens are
+// stripped, while what claude needs to run and auth via its keychain (PATH, HOME)
+// survives. It also confirms the mutating posture (bypass mode, bound cwd).
+func TestBuildMutatingCmd_ScrubsEnv(t *testing.T) {
+	// No t.Parallel: uses t.Setenv.
+	t.Setenv("PATH", "/usr/bin:/bin")
+	t.Setenv("HOME", "/home/tester")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-should-be-dropped")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-should-be-dropped")
+	t.Setenv("AWS_ACCESS_KEY_ID", "aws-id-should-be-dropped")
+	t.Setenv("GITHUB_TOKEN", "gh-should-be-dropped")
+	t.Setenv("GH_TOKEN", "gh2-should-be-dropped")
+	t.Setenv("OPENAI_API_KEY", "oai-should-be-dropped")
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "/path/should-be-dropped")
+	t.Setenv("SOME_CUSTOM_TOKEN", "custom-token-dropped")
+	t.Setenv("MY_APP_SECRET", "secret-dropped")
+	t.Setenv("RANDO_VAR", "not-in-allowlist-dropped")
+
+	spec := SeatSpec{Role: RoleBuild, BriefOnly: true, Mutating: true, RepoRoot: "/tmp/clone"}
+	cmd := BuildMutatingCmd(context.Background(), spec, "brief", "/tmp/clone")
+
+	if cmd.Env == nil {
+		t.Fatalf("mutating worker must have an explicit scrubbed env, not the inherited nil env")
+	}
+	// Sensitive vars must be absent.
+	for _, name := range []string{
+		"ANTHROPIC_API_KEY", "AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID",
+		"GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY",
+		"GOOGLE_APPLICATION_CREDENTIALS", "SOME_CUSTOM_TOKEN", "MY_APP_SECRET", "RANDO_VAR",
+	} {
+		if envHasKey(cmd.Env, name) {
+			t.Errorf("scrubbed env must NOT contain %q; env=%v", name, cmd.Env)
+		}
+	}
+	// The essentials claude needs must survive.
+	if !envContains(cmd.Env, "PATH=/usr/bin:/bin") {
+		t.Errorf("scrubbed env must keep PATH; env=%v", cmd.Env)
+	}
+	if !envContains(cmd.Env, "HOME=/home/tester") {
+		t.Errorf("scrubbed env must keep HOME (claude auths from its keychain/config under HOME); env=%v", cmd.Env)
+	}
+	// Mutating posture: bypass mode, cwd bound to the clone dir.
+	if !argHasFlagValue(cmd.Args, "--permission-mode", permissionBypass) {
+		t.Errorf("mutating cmd must run --permission-mode %s; args=%v", permissionBypass, cmd.Args)
+	}
+	if cmd.Dir != "/tmp/clone" {
+		t.Errorf("mutating cmd Dir = %q, want the clone dir /tmp/clone", cmd.Dir)
+	}
+}
+
+// TestScrubbedBuildEnv_AllowlistAndDenylist unit-tests the env filter directly.
+func TestScrubbedBuildEnv_AllowlistAndDenylist(t *testing.T) {
+	t.Parallel()
+	in := []string{
+		"PATH=/bin", "HOME=/h", "USER=u", "LOGNAME=u", "LANG=en", "TERM=xterm",
+		"TMPDIR=/tmp", "SHELL=/bin/zsh", "LC_ALL=C", "LC_CTYPE=UTF-8",
+		"ANTHROPIC_API_KEY=x", "AWS_REGION=us", "GOOGLE_CLOUD_PROJECT=p",
+		"FOO_TOKEN=t", "BAR_SECRET=s", "BAZ_KEY=k", "GH_TOKEN=g", "UNLISTED=z",
+		"malformed-no-equals",
+	}
+	out := scrubbedBuildEnv(in)
+	keep := map[string]bool{
+		"PATH=/bin": true, "HOME=/h": true, "USER=u": true, "LOGNAME=u": true,
+		"LANG=en": true, "TERM=xterm": true, "TMPDIR=/tmp": true, "SHELL=/bin/zsh": true,
+		"LC_ALL=C": true, "LC_CTYPE=UTF-8": true,
+	}
+	got := map[string]bool{}
+	for _, kv := range out {
+		got[kv] = true
+	}
+	for kv := range keep {
+		if !got[kv] {
+			t.Errorf("scrubbedBuildEnv dropped an allowlisted var %q", kv)
+		}
+	}
+	for _, kv := range out {
+		if !keep[kv] {
+			t.Errorf("scrubbedBuildEnv leaked a non-allowlisted var %q", kv)
+		}
+	}
+}
+
+func envHasKey(env []string, key string) bool {
+	for _, e := range env {
+		if strings.HasPrefix(e, key+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 func flagValue(args []string, flag string) (string, bool) {

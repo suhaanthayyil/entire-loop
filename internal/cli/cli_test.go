@@ -2,9 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/suhaanthayyil/entire-loop/internal/agent"
+	briefing "github.com/suhaanthayyil/entire-loop/internal/context"
+	"github.com/suhaanthayyil/entire-loop/internal/org"
 )
 
 func TestWithDefaultCommand(t *testing.T) {
@@ -47,6 +52,37 @@ func TestDataDir_XDGFallback(t *testing.T) {
 	want := filepath.Join("/xdg", "entire", "plugins", "data", "loop")
 	if got := xdg.DataDir(); got != want {
 		t.Errorf("XDG DataDir = %q, want %q", got, want)
+	}
+}
+
+// TestBuildPlanner covers the --planner flag wiring: llm (default) → the
+// self-planning LLMPlanner; fixed → the static FixedPlanner; anything else errors.
+func TestBuildPlanner(t *testing.T) {
+	t.Parallel()
+	base := org.FixedPlanner{RepoRoot: "/r"}
+	runner := &agent.FakeRunner{}
+	briefer := briefing.Builder{}
+
+	for _, mode := range []string{"", "llm"} {
+		p, err := buildPlanner(mode, base, runner, briefer, io.Discard)
+		if err != nil {
+			t.Fatalf("buildPlanner(%q): %v", mode, err)
+		}
+		if _, ok := p.(org.LLMPlanner); !ok {
+			t.Errorf("buildPlanner(%q) = %T, want org.LLMPlanner (self-planning default)", mode, p)
+		}
+	}
+
+	p, err := buildPlanner("fixed", base, runner, briefer, io.Discard)
+	if err != nil {
+		t.Fatalf("buildPlanner(fixed): %v", err)
+	}
+	if _, ok := p.(org.FixedPlanner); !ok {
+		t.Errorf("buildPlanner(fixed) = %T, want org.FixedPlanner (static roster)", p)
+	}
+
+	if _, err := buildPlanner("bogus", base, runner, briefer, io.Discard); err == nil {
+		t.Errorf("buildPlanner(bogus) should error")
 	}
 }
 

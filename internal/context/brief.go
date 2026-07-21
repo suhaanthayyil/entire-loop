@@ -63,15 +63,18 @@ type Builder struct {
 	GraphHeadLines int
 }
 
-// Brief builds the brief for one seat. It satisfies org.Briefer.
-func (b Builder) Brief(ctx context.Context, goal string, st *state.State, seat agent.SeatSpec) (string, error) {
-	return BuildBrief(ctx, b, goal, st, seat)
+// Brief builds the brief for one seat. It satisfies org.Briefer. upstream carries
+// the validated outputs of this seat's upstream nodes in the round DAG so data
+// flows across the edge (e.g. build sees research's findings; critic sees build's
+// proposal).
+func (b Builder) Brief(ctx context.Context, goal string, st *state.State, seat agent.SeatSpec, upstream []state.SeatOutcome) (string, error) {
+	return BuildBrief(ctx, b, goal, st, seat, upstream)
 }
 
 // BuildBrief assembles and renders the brief for a seat. It never hard-fails on a
 // missing sibling; the returned error is non-nil only when the seat template
 // itself cannot be rendered.
-func BuildBrief(ctx context.Context, b Builder, goal string, st *state.State, seat agent.SeatSpec) (string, error) {
+func BuildBrief(ctx context.Context, b Builder, goal string, st *state.State, seat agent.SeatSpec, upstream []state.SeatOutcome) (string, error) {
 	execFn := b.Exec
 	if execFn == nil {
 		execFn = defaultExec
@@ -87,15 +90,29 @@ func BuildBrief(ctx context.Context, b Builder, goal string, st *state.State, se
 
 	sectionCap := maxBytes / 2
 
-	graph := gatherGraph(ctx, execFn, b.Env.RepoRoot, headLines, sectionCap)
+	// Bind the graph invocation to the SEAT's repo root when it carries one. This
+	// is what keeps a MUTATING build seat's brief pointed at the throwaway CLONE
+	// (the loop sets seat.RepoRoot = clone dir before briefing) instead of leaking
+	// the real repo path to the bypass worker; every other seat carries the real
+	// root and is unaffected.
+	graphRoot := seat.RepoRoot
+	if graphRoot == "" {
+		graphRoot = b.Env.RepoRoot
+	}
+	graph := gatherGraph(ctx, execFn, graphRoot, headLines, sectionCap)
 	brainCtx := gatherBrainQuery(ctx, execFn, goal, sectionCap)
 
 	values := map[string]string{
-		templates.MarkerGoal:    strings.TrimSpace(goal),
-		templates.MarkerState:   compactState(st),
-		templates.MarkerGraph:   graph,
-		templates.MarkerBrief:   brainCtx,
-		templates.MarkerMetrics: metricsBlock(st),
+		templates.MarkerGoal:        strings.TrimSpace(goal),
+		templates.MarkerState:       compactState(st),
+		templates.MarkerGraph:       graph,
+		templates.MarkerBrief:       brainCtx,
+		templates.MarkerMetrics:     metricsBlock(st),
+		templates.MarkerUpstream:    upstreamBlock(upstream, sectionCap),
+		templates.MarkerLens:        strings.TrimSpace(seat.Lens),
+		templates.MarkerRefinedGoal: refinedGoalBlock(st),
+		templates.MarkerSubgoals:    subgoalsBlock(st),
+		templates.MarkerFocus:       focusBlock(seat.Focus),
 	}
 
 	rendered, err := templates.Render(seat.Role, values)
@@ -103,6 +120,30 @@ func BuildBrief(ctx context.Context, b Builder, goal string, st *state.State, se
 		return "", err
 	}
 	return boundString(rendered, maxBytes), nil
+}
+
+// upstreamBlock renders the validated output of a seat's upstream nodes for the
+// ${UPSTREAM} marker: each upstream seat's findings AND its full proposal (the
+// actual diff, not just a byte count — a downstream critic must see the real
+// change to verify it). Bounded to the section budget.
+func upstreamBlock(upstream []state.SeatOutcome, limit int) string {
+	if len(upstream) == 0 {
+		return "(no upstream seat output this round)"
+	}
+	var b strings.Builder
+	for _, seat := range upstream {
+		fmt.Fprintf(&b, "== %s ==\n", seat.Role)
+		for _, f := range seat.Findings {
+			fmt.Fprintf(&b, "- %s\n", oneLine(truncate(f, 400)))
+		}
+		if strings.TrimSpace(seat.Proposal) != "" {
+			fmt.Fprintf(&b, "proposal:\n%s\n", truncate(seat.Proposal, limit/2))
+		}
+		if seat.Verdict != "" {
+			fmt.Fprintf(&b, "verdict: %s\n", oneLine(truncate(seat.Verdict, 400)))
+		}
+	}
+	return boundString(strings.TrimSpace(b.String()), limit)
 }
 
 // gatherGraph shells `entire graph symbols` under its own per-call timeout and
@@ -189,6 +230,54 @@ func metricsBlock(st *state.State) string {
 		parts = append(parts, fmt.Sprintf("%s=%.4g", k, st.Metrics[k]))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// refinedGoalBlock renders the control plane's refined goal from state for the
+// ${REFINED_GOAL} marker. It is empty (collapses to nothing) under the fixed
+// planner or before the first refinement, so a worker template that carries the
+// marker shows the block only once a control seat has refined the goal.
+func refinedGoalBlock(st *state.State) string {
+	if st == nil {
+		return ""
+	}
+	rg := strings.TrimSpace(st.RefinedGoal)
+	if rg == "" {
+		return ""
+	}
+	return "Refined goal (control plane):\n" + truncate(rg, 4*1024)
+}
+
+// subgoalsBlock renders the control plane's subgoals from state for the
+// ${SUBGOALS} marker, one per line. Empty when there are none.
+func subgoalsBlock(st *state.State) string {
+	if st == nil || len(st.Subgoals) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Subgoals (control plane):")
+	for _, s := range st.Subgoals {
+		s = oneLine(truncate(s, 400))
+		if s == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "\n- %s", s)
+	}
+	if b.Len() == len("Subgoals (control plane):") {
+		return ""
+	}
+	return b.String()
+}
+
+// focusBlock renders a seat's per-round focus text for the ${FOCUS} marker. The
+// focus is opaque prompt text (bounded by the planner) that only ever lands in the
+// brief body — never as a flag or command — so it needs no escaping here, only a
+// label. Empty focus collapses to nothing.
+func focusBlock(focus string) string {
+	f := strings.TrimSpace(focus)
+	if f == "" {
+		return ""
+	}
+	return "Your focus this round (from the control plane):\n" + f
 }
 
 // defaultExec streams a sibling command's stdout through a byte-bounded reader
