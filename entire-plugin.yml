@@ -1,0 +1,7 @@
+name: loop
+description: Self-prompting agent-org graph loop — fan out worker seats over a goal (plan → research/build/critic/measure → verify → synthesize) with hybrid per-seat brain wiring.
+requires:
+  - name: graph
+    repo_url: https://github.com/entireio/entire-graph
+  - name: brain
+    repo_url: https://github.com/entireio/entire-brain

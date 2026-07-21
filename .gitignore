@@ -1,0 +1,14 @@
+# Built plugin binary
+/entire-loop
+/dist/
+
+# Run state written under a repo-local data dir during local dev
+/runs/
+
+# Local agent/tooling workspace scaffolding — not part of the plugin
+/.claude/
+/.codex/
+/.cursor/
+/.gemini/
+/.entire/
+/.mcp.json
