@@ -8,14 +8,15 @@ plans the round, worker seats (research → build → critic → measure/synthes
 fan out concurrently, the round is verified and synthesized, and the plan is
 rewritten from the result — round after round until the goal is met or the round
 budget is spent. Loops beat single shots because each round is briefed from the
-last, and the org's own structural **graph** and durable **brain** feed the next
-plan.
+last, and the org's own structural **graph** — plus durable **brain**, when
+available — feed the next plan.
 
 It is a **plugin**, so it composes with the rest of Entire's code intelligence.
-Every worker seat is briefed from the sibling `graph` (structural symbols/edges)
-and `brain` (durable knowledge) plugins, with **hybrid per-seat wiring**: cheap
-seats read a pre-built brief with MCP off; deep seats bind the brain MCP server
-directly.
+Every worker seat is briefed from the sibling `graph` (structural symbols/edges,
+**required**) and, when installed, `brain` (durable knowledge, **optional** —
+auto-used if present, degrades to graph-only otherwise), with **hybrid per-seat
+wiring**: cheap seats read a pre-built brief with MCP off; deep seats bind the
+brain MCP server directly when brain is available.
 
 ```
 entire loop "<goal>"
@@ -67,15 +68,22 @@ safety cap (default 6). Pass `--rounds N` for fixed-count mode.
 
 ## Prerequisites
 
-`entire-loop` is a plugin on top of the Entire CLI and its two sibling
-code-intelligence plugins. You need, on your `PATH`:
+`entire-loop` is a plugin on top of the Entire CLI and one required
+code-intelligence sibling; a second sibling enriches it but is optional. You
+need, on your `PATH`:
 
 - **`entire`** — the parent [Entire CLI](https://github.com/entireio) (`entire`
   must resolve; the plugin runs as `entire loop`).
-- **`entire-graph`** — the structural provider (symbols + edges), installed as
-  the `graph` plugin. Source: <https://github.com/entireio/entire-graph>.
-- **`entire-brain`** — the durable knowledge store + MCP tools, installed as the
-  `brain` plugin. Source: <https://github.com/entireio/entire-brain>.
+- **`entire-graph`** *(required)* — the structural provider (symbols + edges),
+  installed as the `graph` plugin. Public source:
+  <https://github.com/entireio/entire-graph>.
+- **`entire-brain`** *(optional)* — the durable knowledge store + MCP tools,
+  installed as the `brain` plugin. Source:
+  <https://github.com/entireio/entire-brain> — this repo is currently
+  **internal/private**, so most public users won't be able to install it yet.
+  `entire-loop` **auto-uses brain when it's present** and runs fine without it:
+  every brief falls back to graph + goal, so the loop is fully usable
+  graph-backed alone.
 - **A logged-in agent CLI** — `claude` ([Claude Code](https://www.anthropic.com/claude-code))
   on your `PATH`, already authenticated (the worker seats shell out to
   `claude --print`). `entire-loop` never handles your API key; `claude`
@@ -86,7 +94,8 @@ code-intelligence plugins. You need, on your `PATH`:
 
 `entire-loop` installs the same way as the other Entire plugins — build the
 binary and register it with `entire plugin install`. The bundled installer
-chains the siblings first (graph, then brain), then the loop:
+chains the required sibling first (graph), tries the optional one (brain), then
+installs the loop:
 
 ```sh
 git clone https://github.com/suhaanthayyil/entire-loop
@@ -94,10 +103,13 @@ cd entire-loop
 sh scripts/install.sh
 ```
 
-`scripts/install.sh` verifies `entire` is on `PATH`, ensures the `graph` and
-`brain` plugins are installed and reachable (building them from sibling checkouts
-if you have them — see below), builds and registers `entire-loop`, then runs
-`entire loop doctor`.
+`scripts/install.sh` verifies `entire` is on `PATH`, ensures the `graph` plugin
+is installed and reachable (building it from a sibling checkout if you have
+one — see below; **required**, the install fails if this can't be satisfied),
+then tries to do the same for the `brain` plugin (**optional** — if brain's
+checkout is missing, its build fails, or it's simply unreachable, the installer
+prints a one-line note and continues rather than failing), builds and registers
+`entire-loop`, then runs `entire loop doctor`.
 
 The siblings are expected next to this repo (`../entire-graph`, `../entire-brain`),
 or point the installer at them explicitly:
@@ -108,31 +120,35 @@ ENTIRE_BRAIN_DIR=/path/to/entire-brain \
   sh scripts/install.sh
 ```
 
-If a sibling is neither installed nor checked out, the installer stops with a
-clear message and the `git clone` command to run. To (re)register only the loop
-binary once the siblings are in place:
+If the **required** `graph` sibling is neither installed nor checked out, the
+installer stops with a clear message and the `git clone` command to run. If the
+**optional** `brain` sibling is unavailable, the installer notes it and moves on
+— entire-loop will run graph-backed. To (re)register only the loop binary once
+the siblings you want are in place:
 
 ```sh
 sh scripts/install-local.sh
 ```
 
-## Populate the brain (important)
+## Populate the brain (optional, if you have it)
 
 Brain-backed briefs need a **built brain**. The graph provider works
 **statelessly** — `entire graph symbols`/`edges` parse your working tree with no
 setup — but the brain must be indexed for a repo before it returns durable facts,
-history, and docs. In the repo you want to loop over, run:
+history, and docs. If you have `entire-brain` installed, in the repo you want to
+loop over, run:
 
 ```sh
 entire brain refresh          # build/refresh the brain for this repo
 entire brain status           # confirm sources are indexed
 ```
 
-`entire-loop` **degrades gracefully** when the brain is empty or unreachable:
-each brief simply carries a "(brain unavailable)" note instead of durable
-context, and the loop still runs on the graph alone. `entire loop doctor` prints
-a hint to run `entire brain refresh` when it detects the brain has no data
-indexed for the current repo.
+`entire-loop` **degrades gracefully** when the brain is absent, empty, or
+unreachable: each brief simply carries a "(brain unavailable)" note instead of
+durable context, and the loop still runs on the graph alone. `entire loop doctor`
+prints a hint to run `entire brain refresh` when it detects the brain has no data
+indexed for the current repo (and reports brain as reachable/not either way,
+without failing the check).
 
 ## Usage
 
@@ -166,27 +182,33 @@ unset), rewritten after every round. `entire loop status` reads it back.
 ## How it uses brain + graph
 
 Each seat's **brief** is assembled from two sources and folded into the seat's
-role template:
+role template — **`graph` is required; `brain` is an optional enhancement**,
+auto-used when the `brain` plugin is installed and reachable:
 
-- **`entire brain query "<goal>"`** — hybrid (lexical + vector, RRF) retrieval of
-  durable facts, prior decisions, history, and docs.
-- **`entire graph symbols --repo <root> --format ndjson`** — the code structure
-  (definitions) around the goal, bounded to a head so a large repo can't blow the
-  brief budget. (`entire graph edges` — callers/callees — is available for
-  relationship-heavy work; the research seat additionally binds the brain MCP,
-  which exposes the same graph.)
+- **`entire graph symbols --repo <root> --format ndjson`** *(required)* — the
+  code structure (definitions) around the goal, bounded to a head so a large
+  repo can't blow the brief budget. (`entire graph edges` — callers/callees — is
+  available for relationship-heavy work; the research seat additionally binds
+  the brain MCP, which exposes the same graph, when brain is present.)
+- **`entire brain query "<goal>"`** *(optional)* — hybrid (lexical + vector,
+  RRF) retrieval of durable facts, prior decisions, history, and docs. When
+  brain is absent, unreachable, or has no data indexed for the repo, this
+  section of the brief degrades to a graceful "(brain context unavailable)"
+  note and the seat still runs on the graph + goal alone.
 
 Wiring is **hybrid per seat**:
 
 - **Deep seats** (research, critic) bind the `entire-brain` MCP server
   (`claude --mcp-config … entire brain mcp`) and get `ENTIRE_REPO_ROOT` in their
-  env so the brain binds the target repo. Default model: `sonnet`.
+  env so the brain binds the target repo, **when brain is installed**. Default
+  model: `sonnet`.
 - **Cheap seats** (build, measure, verifiers, control) run with MCP fully **off**
   (`--strict-mcp-config` + empty server set) and work from the pre-assembled brief
   only. Default model: `claude-haiku-4-5`.
 
 Every shell-out is bounded and time-boxed: a slow, hung, or missing sibling
-surfaces a graceful note in the brief instead of stalling or failing the loop.
+surfaces a graceful note in the brief instead of stalling or failing the loop —
+this is what makes brain safe to omit entirely.
 
 ## ⚠️ Security / trust boundary
 

@@ -1,7 +1,9 @@
 name: loop
-description: Self-prompting agent-org graph loop — fan out worker seats over a goal (plan → research/build/critic/measure → verify → synthesize) with hybrid per-seat brain wiring.
+description: Self-prompting agent-org graph loop — fan out worker seats over a goal (plan → research/build/critic/measure → verify → synthesize) with hybrid per-seat brain wiring. Requires the graph plugin; the brain plugin is an optional enhancement, auto-used when installed (graph-backed briefs work fine without it).
 requires:
   - name: graph
     repo_url: https://github.com/entireio/entire-graph
-  - name: brain
-    repo_url: https://github.com/entireio/entire-brain
+# brain (https://github.com/entireio/entire-brain) is an OPTIONAL enhancement, not a
+# hard requirement: it is private, so public users cannot install it. entire-loop
+# auto-uses it when the `brain` plugin is present and degrades gracefully (graph +
+# goal only) when it is not.
