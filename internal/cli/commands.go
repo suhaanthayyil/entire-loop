@@ -291,6 +291,7 @@ type doctorReport struct {
 	NoEgress    bool              `json:"no_egress"`
 	Graph       siblingProbe      `json:"graph"`
 	Brain       siblingProbe      `json:"brain"`
+	BrainEmpty  bool              `json:"brain_empty"`
 }
 
 func newDoctorCommand(version string) *cobra.Command {
@@ -328,7 +329,15 @@ func runDoctor(cmd *cobra.Command, version string, asJSON bool) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), probeTimeout)
 	defer cancel()
 	report.Graph.Reachable, report.Graph.Detail = probe(ctx, "entire", "graph", "doctor", "--json")
-	report.Brain.Reachable, report.Brain.Detail = probe(ctx, "entire", "brain", "status")
+	report.Brain.Reachable, report.Brain.Detail = probe(ctx, "entire", "brain", "status", "--json")
+	if report.Brain.Reachable {
+		// The brain is reachable; check whether it actually holds data for this
+		// repo. If not, doctor emits a non-fatal hint to run `entire brain refresh`.
+		// Suppress the verbose status JSON from the reachable detail — it is only
+		// surfaced on failure.
+		report.BrainEmpty = brainHasNoData(report.Brain.Detail)
+		report.Brain.Detail = ""
+	}
 
 	out := cmd.OutOrStdout()
 	if asJSON {
@@ -346,7 +355,34 @@ func runDoctor(cmd *cobra.Command, version string, asJSON bool) error {
 	fmt.Fprintf(out, "no_egress=%v\n", report.NoEgress)
 	fmt.Fprintf(out, "graph=%s\n", reachableLabel(report.Graph))
 	fmt.Fprintf(out, "brain=%s\n", reachableLabel(report.Brain))
+	if report.BrainEmpty {
+		fmt.Fprintln(out, "brain_hint=no data indexed for this repo; run 'entire brain refresh' to populate briefs (graph works statelessly)")
+	}
 	return nil
+}
+
+// brainHasNoData reports whether `entire brain status --json` shows an indexed
+// brain with NO data sources for the repo. It parses the sources map and returns
+// true only when the parse succeeds and every source is present-but-false, so an
+// unparseable status, an older schema without a sources map, or a partially built
+// brain never trips the hint. The hint it drives is advisory only: the loop
+// degrades gracefully when the brain is empty (briefs carry a note instead).
+func brainHasNoData(statusJSON string) bool {
+	var s struct {
+		Sources map[string]bool `json:"sources"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(statusJSON)), &s); err != nil {
+		return false
+	}
+	if len(s.Sources) == 0 {
+		return false
+	}
+	for _, on := range s.Sources {
+		if on {
+			return false
+		}
+	}
+	return true
 }
 
 func reachableLabel(p siblingProbe) string {

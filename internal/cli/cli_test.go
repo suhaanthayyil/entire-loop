@@ -86,6 +86,34 @@ func TestBuildPlanner(t *testing.T) {
 	}
 }
 
+// TestBrainHasNoData covers the doctor brain-empty hint: an indexed brain whose
+// every source is false triggers the `entire brain refresh` hint; a brain with
+// any live source, an older/empty schema, or unparseable output does not.
+func TestBrainHasNoData(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"all sources false", `{"sources":{"seed":false,"sessions":false,"semantic":false,"history":false,"facts":false}}`, true},
+		{"one source live", `{"sources":{"seed":false,"semantic":true,"facts":false}}`, false},
+		{"no sources key", `{"repo":{"root":"/r"}}`, false},
+		{"empty sources map", `{"sources":{}}`, false},
+		{"not json", `Brain\n  sources: seed=false`, false},
+		{"empty string", ``, false},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := brainHasNoData(tt.in); got != tt.want {
+				t.Errorf("brainHasNoData(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestVersionCommand_JSON(t *testing.T) {
 	t.Parallel()
 	root := NewRootCommand("1.2.3")

@@ -1,6 +1,11 @@
-# Built plugin binary
+# Built plugin binaries
 /entire-loop
+/entire-loop-graphorg
 /dist/
+
+# Throwaway mutating-build clones live in the OS temp dir (never under the repo);
+# ignore any that a misconfigured TMPDIR could drop here, defensively.
+/entire-loop-build-*/
 
 # Run state written under a repo-local data dir during local dev
 /runs/
