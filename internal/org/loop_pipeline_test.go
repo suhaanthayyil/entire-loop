@@ -225,6 +225,57 @@ func TestMutatingSeat_BoundToCloneNotRepo(t *testing.T) {
 	}
 }
 
+// cloneWritingRunner is a MutatingBuildRunner that WRITES a file into the build
+// clone (simulating the change the bypass worker would produce), so a test can prove
+// the external measure ran INSIDE that clone rather than against the untouched repo.
+type cloneWritingRunner struct {
+	agent.FakeRunner
+	file    string
+	content string
+}
+
+func (r *cloneWritingRunner) RunBypassInClone(_ context.Context, spec agent.SeatSpec, _ string, clone *agent.BuildClone) agent.SeatResult {
+	_ = os.WriteFile(filepath.Join(clone.Dir, r.file), []byte(r.content), 0o600)
+	return agent.SeatResult{Role: spec.Role, OK: true, Proposal: "wrote " + r.file}
+}
+
+// TestLoop_MeasureRunsInBuildClone is the finding-2 guard: because the loop is
+// propose-only (the change lives ONLY in the throwaway clone, never applied to
+// repoRoot), the external MeasureEdge must run inside that clone. The build seat
+// writes metric.json into the clone; the measure command reads it there. Measuring
+// repoRoot (which has no metric.json) would fail and yield no external metric.
+func TestLoop_MeasureRunsInBuildClone(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	repo := initGitRepoForOrg(t)
+	runner := &cloneWritingRunner{
+		FakeRunner: agent.FakeRunner{Default: agent.SeatResult{OK: true}},
+		file:       "metric.json",
+		content:    `{"progress": 0.9}`,
+	}
+	// Real executor (no Exec stub): `cat metric.json` runs in the measure Dir, which
+	// the loop points at the clone when a mutating build ran.
+	measure := &MeasureEdge{Cmd: "cat metric.json", Dir: repo}
+	st, err := Run(context.Background(), Options{
+		Goal:     "measure the round's actual change",
+		Rounds:   1,
+		RepoRoot: repo,
+		Runner:   runner,
+		Briefer:  staticBriefer{},
+		Planner:  FixedPlanner{AllowMutating: true, RepoRoot: repo},
+		Measure:  measure,
+		Store:    newTestStore(t),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := st.Rounds[0].Metrics["progress"]; got != 0.9 {
+		t.Errorf("measure must run in the build clone (which has metric.json); progress = %v, want 0.9", got)
+	}
+}
+
 // panicRunner panics for a chosen role and otherwise returns OK.
 type panicRunner struct{ role string }
 

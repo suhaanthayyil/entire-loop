@@ -48,6 +48,23 @@ type RoundState struct {
 	EndedAt   time.Time          `json:"ended_at"`
 }
 
+// FrozenSeat is the persisted description of one seat in an immutable-plan-mode
+// roster. It mirrors the seat-defining fields of agent.SeatSpec but lives in the
+// state package so state keeps NO dependency on the agent exec/argv machinery (the
+// org package converts between the two). Round is intentionally omitted — the loop
+// re-stamps the round onto the roster every round.
+type FrozenSeat struct {
+	Role      string `json:"role"`
+	BriefOnly bool   `json:"brief_only,omitempty"`
+	McpBrain  bool   `json:"mcp_brain,omitempty"`
+	Mutating  bool   `json:"mutating,omitempty"`
+	Model     string `json:"model,omitempty"`
+	Effort    string `json:"effort,omitempty"`
+	RepoRoot  string `json:"repo_root,omitempty"`
+	Lens      string `json:"lens,omitempty"`
+	Focus     string `json:"focus,omitempty"`
+}
+
 // State is the full persisted record of a loop run.
 //
 // RefinedGoal and Subgoals are the LLM control plane's evolving restatement of the
@@ -55,6 +72,10 @@ type RoundState struct {
 // (a) subsequent worker seats' briefs carry the sharpened goal and (b) the next
 // round's control seat builds on its own prior planning rather than restarting.
 // They are empty under the fixed planner.
+//
+// FrozenSeats is the immutable-plan-mode roster, decided once on the first round
+// and persisted so a RESUME (a new process) rehydrates the SAME DAG instead of
+// re-planning and re-freezing a different one. It is empty under dynamic plan-mode.
 type State struct {
 	SchemaVersion int                `json:"schema_version"`
 	RunID         string             `json:"run_id"`
@@ -64,6 +85,7 @@ type State struct {
 	Round         int                `json:"round"`
 	Rounds        []RoundState       `json:"rounds"`
 	Metrics       map[string]float64 `json:"metrics,omitempty"`
+	FrozenSeats   []FrozenSeat       `json:"frozen_seats,omitempty"`
 	GoalMet       bool               `json:"goal_met"`
 	TotalCostUSD  float64            `json:"total_cost_usd"`
 	CreatedAt     time.Time          `json:"created_at"`

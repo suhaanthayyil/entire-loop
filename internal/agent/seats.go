@@ -182,6 +182,12 @@ var mutatingEnvAllowlist = map[string]bool{
 	"SHELL":   true,
 }
 
+// ScrubbedBuildEnv is the exported view of scrubbedBuildEnv, so other process-spawn
+// sites (e.g. the external MeasureEdge command in package org) can reuse the exact
+// same credential-stripping allowlist rather than handing a shelled-out helper the
+// full ambient environment (tokens, cloud creds).
+func ScrubbedBuildEnv(environ []string) []string { return scrubbedBuildEnv(environ) }
+
 // scrubbedBuildEnv returns a minimal allowlisted environment for the bypass build
 // worker from the given environ (os.Environ() in production). Only the allowlisted
 // names (and LC_* locale vars) survive; every other variable is dropped. As a

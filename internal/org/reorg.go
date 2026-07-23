@@ -76,7 +76,9 @@ func (r RulesReorg) budgetOutpacesProgress(st *state.State) bool {
 	if st == nil || st.TotalCostUSD <= 0 {
 		return false
 	}
-	progress := st.Metrics["progress"]
+	// Read progress through the typed RoundMetrics accessor rather than a stringly
+	// -typed map lookup (the first-class progress signal the loop reasons over).
+	progress := metricsFrom(st.Metrics).Progress()
 	threshold := r.BudgetPerProgress
 	if threshold <= 0 {
 		threshold = defaultBudgetPerProgress

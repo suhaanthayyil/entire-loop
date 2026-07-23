@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,15 +27,19 @@ const probeTimeout = 15 * time.Second
 // ---- run ----
 
 type runParams struct {
-	repo          string
-	rounds        int
-	maxRounds     int
-	jobs          int
-	model         string
-	effort        string
-	goal          string
-	allowMutating bool
-	planner       string
+	repo           string
+	rounds         int
+	maxRounds      int
+	jobs           int
+	model          string
+	effort         string
+	goal           string
+	allowMutating  bool
+	planner        string
+	planMode       string
+	measureCmd     string
+	convergeMetric string
+	convergeAt     float64
 }
 
 func newRunCommand(_ string) *cobra.Command {
@@ -61,6 +66,14 @@ The goal is the remaining positional arguments joined together, so both
 		"Let the build seat run a bypassPermissions coding agent in an isolated throwaway clone (default: plan-mode propose-as-text only)")
 	cmd.Flags().StringVar(&p.planner, "planner", "llm",
 		"Round planner: \"llm\" (self-planning control plane — an LLM control seat plans and re-plans each round; adds one control-seat cost per round) or \"fixed\" (static research/build/critic/measure roster)")
+	cmd.Flags().StringVar(&p.planMode, "plan-mode", "dynamic",
+		"Plan-mutability axis (orthogonal to --planner): \"dynamic\" (re-plan the seat DAG every round from state — the graph rewrites itself) or \"immutable\" (plan the whole DAG ONCE up front, disable runtime reorg, and execute it every round with bounded per-node recovery — the fixed-script position)")
+	cmd.Flags().StringVar(&p.measureCmd, "measure-cmd", "",
+		"External measure command (off by default). Runs each round under a timeout (own process group, killed on timeout; stdout capped; env scrubbed); its JSON stdout (e.g. {\"progress\":0.8}) is parsed into typed round metrics that OVERRIDE the claude-derived ones and feed the reorg edge. It measures the mutating-build clone when one ran, else the repo root. By itself it does NOT stop the loop — pair it with --converge-metric to make a metric threshold end the run. Must be read-only (non-mutating) — the loop never grants it write privilege")
+	cmd.Flags().StringVar(&p.convergeMetric, "converge-metric", "",
+		"Metric-threshold convergence (off by default). The metric name to watch, or an inline form \"name>=value\" / \"name<=value\". When set (with --converge-at, or the inline value), a round meets the goal — stopping the loop — once that metric crosses the threshold. This is the only way an external measurement stops the loop; usually paired with --measure-cmd")
+	cmd.Flags().Float64Var(&p.convergeAt, "converge-at", 0,
+		"Threshold value for --converge-metric (comparison is >= unless the inline \"name<=value\" form is used). Ignored when --converge-metric is unset")
 	return cmd
 }
 
@@ -98,31 +111,58 @@ func runLoop(cmd *cobra.Command, p runParams) error {
 	if err != nil {
 		return err
 	}
+	planMode, err := parsePlanMode(p.planMode)
+	if err != nil {
+		return err
+	}
 
 	mode := "converge"
 	if p.rounds > 0 {
 		mode = fmt.Sprintf("fixed %d round(s)", p.rounds)
 	}
-	fmt.Fprintf(out, "entire-loop: goal=%q repo=%s run=%s mode=%s planner=%s max_rounds=%d jobs=%d\n",
-		p.goal, repoRoot, runID, mode, plannerLabel(p.planner), p.maxRounds, p.jobs)
+	fmt.Fprintf(out, "entire-loop: goal=%q repo=%s run=%s mode=%s planner=%s plan-mode=%s max_rounds=%d jobs=%d\n",
+		p.goal, repoRoot, runID, mode, plannerLabel(p.planner), planMode, p.maxRounds, p.jobs)
 	if p.allowMutating {
 		fmt.Fprintln(out, "entire-loop: --allow-mutating-build ON — the build seat will run a bypassPermissions coding agent in an ISOLATED throwaway clone (your repo is not touched; env is scrubbed).")
 	}
 
+	var measure *org.MeasureEdge
+	if strings.TrimSpace(p.measureCmd) != "" {
+		measure = &org.MeasureEdge{Cmd: p.measureCmd, Dir: repoRoot}
+		fmt.Fprintf(out, "entire-loop: measure-edge ON — running %q each round for external metrics (must be read-only).\n", p.measureCmd)
+	}
+
+	convergeMetric, convergeAt, convergeBelow, err := parseConvergeSpec(p.convergeMetric, p.convergeAt)
+	if err != nil {
+		return err
+	}
+	if convergeMetric != "" {
+		op := ">="
+		if convergeBelow {
+			op = "<="
+		}
+		fmt.Fprintf(out, "entire-loop: converge-metric ON — the run stops once %q %s %g.\n", convergeMetric, op, convergeAt)
+	}
+
 	opts := org.Options{
-		Goal:      p.goal,
-		Rounds:    p.rounds,
-		MaxRounds: p.maxRounds,
-		Jobs:      p.jobs,
-		Model:     p.model,
-		Effort:    p.effort,
-		RepoRoot:  repoRoot,
-		Runner:    runner,
-		Briefer:   builder,
-		Planner:   planner,
-		Reorg:     org.RulesReorg{Goal: p.goal},
-		Store:     store,
-		Stdout:    out,
+		Goal:           p.goal,
+		Rounds:         p.rounds,
+		MaxRounds:      p.maxRounds,
+		Jobs:           p.jobs,
+		Model:          p.model,
+		Effort:         p.effort,
+		RepoRoot:       repoRoot,
+		PlanMode:       planMode,
+		Measure:        measure,
+		ConvergeMetric: convergeMetric,
+		ConvergeAt:     convergeAt,
+		ConvergeBelow:  convergeBelow,
+		Runner:         runner,
+		Briefer:        builder,
+		Planner:        planner,
+		Reorg:          org.RulesReorg{Goal: p.goal},
+		Store:          store,
+		Stdout:         out,
 	}
 	if _, err := org.Run(cmd.Context(), opts); err != nil {
 		return err
@@ -153,6 +193,47 @@ func plannerLabel(mode string) string {
 		return "fixed"
 	}
 	return "llm"
+}
+
+// parsePlanMode maps the --plan-mode flag onto the org plan-mutability axis.
+// "dynamic" (default) re-plans every round; "immutable" freezes the DAG once and
+// runs it with bounded per-node recovery. An unknown value is an error.
+func parsePlanMode(mode string) (org.PlanMode, error) {
+	switch mode {
+	case "", "dynamic":
+		return org.PlanModeDynamic, nil
+	case "immutable":
+		return org.PlanModeImmutable, nil
+	default:
+		return org.PlanModeDynamic, fmt.Errorf("--plan-mode must be \"dynamic\" or \"immutable\", got %q", mode)
+	}
+}
+
+// parseConvergeSpec resolves the metric-threshold convergence config. The metric
+// flag may be a bare name (paired with --converge-at, comparison >=) or an inline
+// "name>=value" / "name<=value" form whose embedded value overrides --converge-at.
+// An empty metric disables convergence. It returns (name, threshold, below, err),
+// where below selects the <= comparison.
+func parseConvergeSpec(metricFlag string, atFlag float64) (string, float64, bool, error) {
+	metricFlag = strings.TrimSpace(metricFlag)
+	if metricFlag == "" {
+		return "", 0, false, nil
+	}
+	for _, op := range []string{">=", "<=", ">", "<"} {
+		if idx := strings.Index(metricFlag, op); idx >= 0 {
+			name := strings.TrimSpace(metricFlag[:idx])
+			rest := strings.TrimSpace(metricFlag[idx+len(op):])
+			if name == "" {
+				return "", 0, false, fmt.Errorf("--converge-metric %q has no metric name", metricFlag)
+			}
+			at, err := strconv.ParseFloat(rest, 64)
+			if err != nil {
+				return "", 0, false, fmt.Errorf("--converge-metric %q: threshold %q is not a number", metricFlag, rest)
+			}
+			return name, at, strings.HasPrefix(op, "<"), nil
+		}
+	}
+	return metricFlag, atFlag, false, nil
 }
 
 // resolveGitTimeout bounds the git top-level discovery so a wedged git can never

@@ -86,6 +86,40 @@ func TestBuildPlanner(t *testing.T) {
 	}
 }
 
+// TestParsePlanMode covers the --plan-mode flag: dynamic (default) and immutable
+// map onto the org axis; anything else errors.
+func TestParsePlanMode(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"", "dynamic"} {
+		got, err := parsePlanMode(mode)
+		if err != nil || got != org.PlanModeDynamic {
+			t.Errorf("parsePlanMode(%q) = %v,%v, want PlanModeDynamic,nil", mode, got, err)
+		}
+	}
+	got, err := parsePlanMode("immutable")
+	if err != nil || got != org.PlanModeImmutable {
+		t.Errorf("parsePlanMode(immutable) = %v,%v, want PlanModeImmutable,nil", got, err)
+	}
+	if _, err := parsePlanMode("bogus"); err == nil {
+		t.Errorf("parsePlanMode(bogus) should error")
+	}
+}
+
+// TestRunCommand_HasNewFlags asserts the run command exposes --plan-mode and
+// --measure-cmd with their documented defaults.
+func TestRunCommand_HasNewFlags(t *testing.T) {
+	t.Parallel()
+	cmd := newRunCommand("dev")
+	pm := cmd.Flags().Lookup("plan-mode")
+	if pm == nil || pm.DefValue != "dynamic" {
+		t.Errorf("--plan-mode flag missing or wrong default: %+v", pm)
+	}
+	mc := cmd.Flags().Lookup("measure-cmd")
+	if mc == nil || mc.DefValue != "" {
+		t.Errorf("--measure-cmd flag missing or non-empty default: %+v", mc)
+	}
+}
+
 // TestBrainHasNoData covers the doctor brain-empty hint: an indexed brain whose
 // every source is false triggers the `entire brain refresh` hint; a brain with
 // any live source, an older/empty schema, or unparseable output does not.

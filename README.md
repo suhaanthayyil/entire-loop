@@ -166,7 +166,9 @@ entire loop version --json
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--planner` | `llm` | Round planner: `llm` (self-planning control plane — an LLM control seat plans and re-plans each round; adds one control-seat cost per round) or `fixed` (static research/build/critic/measure roster) |
+| `--planner` | `llm` | Round planner (HOW a round is planned): `llm` (self-planning control plane — an LLM control seat plans each round; adds one control-seat cost per round) or `fixed` (static research/build/critic/measure roster) |
+| `--plan-mode` | `dynamic` | Plan-mutability axis (WHEN the DAG is planned), orthogonal to `--planner`: `dynamic` (re-plan the seat DAG every round from state — the graph rewrites itself) or `immutable` (plan the DAG **once** up front, disable runtime reorg, and execute it every round with bounded per-node recovery — the fixed-script position). See below. |
+| `--measure-cmd` | *(off)* | External measure command. Runs each round under a timeout; its JSON stdout (e.g. `{"progress":0.8}`) parses into typed round metrics that **override** the claude-derived ones, so the loop converges on a **real external signal**. Must be read-only. See below. |
 | `--rounds` | `0` | Fixed round count (`0` = converge until dry); also caps `--max-rounds` |
 | `--max-rounds` | `6` | Safety cap on rounds in converge mode |
 | `--jobs` | `2` | Max concurrent worker seats (the concurrency cap) |
@@ -174,6 +176,62 @@ entire loop version --json
 | `--repo` | `ENTIRE_REPO_ROOT` → git discovery | Repository root the loop reasons over |
 | `--model` | *(agent default)* | Worker model override (`claude --model`) |
 | `--effort` | *(agent default)* | Worker reasoning effort (`low`/`medium`/`high`) |
+
+### Plan-mutability axis (`--plan-mode`)
+
+`--planner` decides **how** a round is planned; `--plan-mode` decides **when**. They
+are orthogonal — both combine with either planner.
+
+- **`dynamic`** *(default)* — the control seat (or fixed roster) re-plans **every
+  round** from the accumulated state, and runtime reorg may reshape the roster. The
+  graph rewrites itself as work happens: recovery from a failed node is simply
+  re-planning it next round. Best when the shape of the work is discovered as you
+  go.
+- **`immutable`** — the whole seat/node DAG is planned **once up front** and frozen;
+  runtime reorg is disabled and there is no mid-run re-plan. Execution is resilient
+  instead of adaptive: a node that degrades is **retried within a bounded budget**,
+  then left degraded (bounded per-node recovery). This is the scheduler-theory /
+  fixed-script position — reproducible and predictable, at the cost of not adapting
+  the plan to what it learns.
+
+The **tradeoff** is adaptivity vs predictability: `dynamic` can re-route around a
+dead end but its plan is non-deterministic; `immutable` runs a plan you can read
+ahead of time and recovers node failures in place, but cannot change strategy
+mid-run. Both are bounded by `--max-rounds` and the same integrity rules
+(privilege lock, no-egress gate, verifier gate).
+
+### External measure edge (`--measure-cmd`)
+
+By default the round's metrics are what the **measure seat** (a claude worker)
+reasons out. `--measure-cmd` adds a **MeasureEdge** that runs a real command each
+round — a test runner, a coverage tool, a benchmark — under a timeout, and parses
+its JSON stdout into typed round metrics that **override** the claude-derived ones.
+The loop then converges on a signal you can trust rather than one a model asserted:
+
+```sh
+entire loop "make the suite pass" --measure-cmd 'go test ./... -json | my-metrics'
+# the command must print a JSON object of numeric metrics, e.g. {"progress":0.8,"risk":0.1}
+```
+
+Guardrails: it is **off by default** (explicit opt-in), **timeout-bounded**, and
+must be **read-only** — the loop never grants it write privilege and never feeds it
+agent output. Non-numeric fields are ignored; a failure (bad exit, no JSON, no
+numeric metric) degrades gracefully — the round keeps its claude metrics and logs
+the failure.
+
+### Edge taxonomy
+
+A round is a graph of **nodes** (agent seats, each its own worker loop) connected by
+typed **edges** — functions/predicates over the typed round state that decide the
+next node(s) or a gate outcome. The edge set is a small, closed taxonomy:
+
+| Edge | Role |
+|---|---|
+| **DataEdge** | output → input: carries an upstream seat's validated outcome into a downstream seat's brief (the pipeline edges research→build→critic→…) |
+| **ConditionalEdge** | the router: a deterministic predicate on the build proposal's diff size that selects the verify path (solo-critic vs full-audit) |
+| **VerifierEdge** | the adversarial gate: N diverse skeptics must fail to refute a large proposal before it is accepted |
+| **MeasureEdge** | the external signal (above): runs a command and parses its JSON into typed metrics |
+| **CycleEdge** | loop-until-dry: folds each round's outcome into a continue/stop decision (goal-met / dry-streak / fail-streak / cap) |
 
 Run state is persisted to `$ENTIRE_PLUGIN_DATA_DIR/runs/<runID>/state.json`
 (falling back to `~/.local/share/entire/plugins/data/loop` when the env var is
@@ -279,6 +337,25 @@ edits the target repo.
 - **Round-scoped idempotent skip.** A completed *OK* seat result is cached under
   the run dir keyed by round, so a re-run reuses it but round N never replays
   round N-1. Failed results are never cached.
+
+## Multi-runtime
+
+There is **one core** — the `entire-loop` Go binary, invoked as `entire loop`.
+Every runtime is a **thin shim** that shells that same command; no orchestration
+logic is duplicated per runtime. Add a runtime by adding a shim, not by forking
+the loop.
+
+| Runtime | Shim | How it invokes the core |
+|---|---|---|
+| **Entire CLI** | `entire-plugin.yml` (root plugin) | dispatched as `entire loop …`; supplies `ENTIRE_REPO_ROOT` / `ENTIRE_PLUGIN_DATA_DIR` / `ENTIRE_CLI_VERSION` |
+| **Claude Code** | [`claude-code-plugin/`](claude-code-plugin/) | `/graph-loop <goal>` command + `graph-loop` skill run `entire loop "$ARGUMENTS"` via Bash; `.mcp.json` wires the optional `entire-brain` server |
+| **Codex** | [`codex-plugin/`](codex-plugin/) | `commands/graph-loop.toml` prompt instructs Codex to run `entire loop "<goal>"` (`{{args}}` = goal) |
+| **Any agent / harness** | [`docs/any-agent.md`](docs/any-agent.md) | the runtime-agnostic contract: exact command, required env, deps, output/state + exit-code contract, and the `--plan-mode` / `--measure-cmd` knobs |
+
+All four shell the identical command — `entire loop "<goal>" [flags]` — and share
+the same prerequisites (`entire` + `graph` required, `brain` optional), the same
+run-state contract (`$ENTIRE_PLUGIN_DATA_DIR/runs/<id>/state.json`), and the same
+`--allow-mutating-build` trust boundary described above.
 
 ## License
 
