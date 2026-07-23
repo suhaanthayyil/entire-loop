@@ -1,0 +1,19 @@
+{
+  "name": "graph-loop",
+  "version": "0.1.0",
+  "description": "Claude Code shim for entire-loop: run the self-planning agent-org graph loop over a goal. Shells the entire-loop Go core via `entire loop`. Requires the entire CLI + graph plugin on PATH; brain is an optional enhancement.",
+  "author": {
+    "name": "Entire",
+    "url": "https://github.com/entireio"
+  },
+  "homepage": "https://github.com/entireio/entire-loop",
+  "repository": "https://github.com/entireio/entire-loop",
+  "license": "MIT",
+  "keywords": [
+    "agent",
+    "graph",
+    "loop",
+    "orchestration",
+    "entire"
+  ]
+}

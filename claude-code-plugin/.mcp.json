@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "entire-brain": {
+      "type": "stdio",
+      "command": "entire",
+      "args": ["brain", "mcp"]
+    }
+  }
+}

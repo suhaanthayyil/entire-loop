@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "graph-loop",
+  "description": "Self-marketplace for the graph-loop Claude Code plugin — a thin shim over the entire-loop Go core (`entire loop`).",
+  "owner": {
+    "name": "Entire",
+    "url": "https://github.com/entireio"
+  },
+  "plugins": [
+    {
+      "name": "graph-loop",
+      "description": "Run the self-planning agent-org graph loop over a goal via `entire loop`. Requires the entire CLI + graph plugin on PATH; brain optional.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
